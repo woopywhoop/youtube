@@ -2,7 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 )
 
 type UserData struct {
@@ -64,6 +68,12 @@ func MustStringify(obj interface{}) string {
 	return string(bytea)
 }
 
+func (u *UserData) UpdateData(operation func(userdata *UserData)) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	operation(u)
+}
+
 type UsersCache struct {
 	mu           sync.RWMutex
 	userDataById map[string]*UserData
@@ -90,12 +100,61 @@ func (uc *UsersCache) AddUserData(users ...*UserData) {
 	}
 }
 
+// -- Example operations on cache
+
+// Operation on each user data, thread safety of user data access managed by operation function
+func (uc *UsersCache) PerformReadOperation(operation func(userData *UserData)) {
+	uc.mu.RLock()
+	defer uc.mu.RUnlock()
+	for _, userData := range uc.userDataById {
+		operation(userData)
+	}
+}
+
+func (uc *UsersCache) GetSafeCopySlice() []*UserData {
+	uc.mu.RLock()
+	defer uc.mu.RUnlock()
+	res := make([]*UserData, len(uc.userDataById))
+	for _, userData := range uc.userDataById {
+		res = append(res, userData)
+	}
+	return res
+}
+
+func (uc *UsersCache) MapReduceUsers(
+	mapper func(userData *UserData) interface{},
+	reducer func([]interface{}) interface{},
+) interface{} {
+	uc.mu.RLock()
+	defer uc.mu.RUnlock()
+
+	mappedResults := make([]interface{}, 0)
+	for _, userData := range uc.userDataById {
+		result := mapper(userData)
+		mappedResults = append(mappedResults, result)
+	}
+
+	return reducer(mappedResults)
+}
+
+func calculateExperience(userData *UserData) interface{} {
+	return userData.GetExperience()
+}
+
+func sumReducer(results []interface{}) interface{} {
+	total := int64(0)
+	for _, result := range results {
+		total += result.(int64)
+	}
+	return total
+}
+
 func LoadUsersDataFromDB(usersCache *UsersCache) error {
 	// Mock for actual implementation
 	usersCache.AddUserData(
 		NewUserData("uid_001", "king", 1, 100),
-		NewUserData("uid_002", "queen", 1, 100),
-		NewUserData("uid_003", "soldier", 1, 100),
+		NewUserData("uid_002", "queen", 1, 110),
+		NewUserData("uid_003", "soldier", 1, 120),
 	)
 	return nil
 }
@@ -103,4 +162,34 @@ func LoadUsersDataFromDB(usersCache *UsersCache) error {
 func main() {
 	usersCache := NewUsersCache()
 	_ = LoadUsersDataFromDB(usersCache)
+	for i := 0; i < 100; i++ {
+		// iterationId := i
+		go usersCache.PerformReadOperation(func(userData *UserData) {
+			userData.ToApi()
+			userData.UpdateData(func(userdata *UserData) {
+				userdata.Experience += 10
+				userdata.GameLevel = int(userdata.Experience / 100)
+			})
+		})
+		go func() {
+			u, _ := usersCache.GetUserData("uid_001")
+			u.SetExperience(199)
+		}()
+		go func() {
+			u, _ := usersCache.GetUserData("uid_001")
+			u.UpdateData(func(userdata *UserData) {
+				userdata.Experience += 10
+				userdata.GameLevel = int(userdata.Experience / 100)
+			})
+		}()
+		go func() {
+			// totalExperience := usersCache.MapReduceUsers(calculateExperience, sumReducer)
+			// fmt.Printf("total exp: %v\n", totalExperience)
+		}()
+	}
+
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, os.Interrupt, syscall.SIGINT)
+	<-interrupt
+	fmt.Println("Stopping server..")
 }
