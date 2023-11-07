@@ -42,6 +42,31 @@ func NewUserData(userId string, displayName string, gameLevel int, experience in
 		Experience:  experience,
 	}
 }
+
+func (u *UserData) GetDisplayName() string {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.DisplayName
+}
+
+func (u *UserData) SetDisplayName(displayName string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.DisplayName = displayName
+}
+
+func (u *UserData) GetGameLevel() int {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.GameLevel
+}
+
+func (u *UserData) SetGameLevel(gameLevel int) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.GameLevel = gameLevel
+}
+
 func (u *UserData) GetExperience() int64 {
 	u.mu.RLock()
 	defer u.mu.RUnlock()
@@ -103,6 +128,7 @@ func (uc *UsersCache) AddUserData(users ...*UserData) {
 // -- Example operations on cache
 
 // Operation on each user data, thread safety of user data access managed by operation function
+
 func (uc *UsersCache) PerformReadOperation(operation func(userData *UserData)) {
 	uc.mu.RLock()
 	defer uc.mu.RUnlock()
@@ -121,32 +147,53 @@ func (uc *UsersCache) GetSafeCopySlice() []*UserData {
 	return res
 }
 
-func (uc *UsersCache) MapReduceUsers(
+func (uc *UsersCache) MapReduceUsersWithFilter(
+	filter func(userData *UserData) bool,
 	mapper func(userData *UserData) interface{},
 	reducer func([]interface{}) interface{},
 ) interface{} {
 	uc.mu.RLock()
 	defer uc.mu.RUnlock()
 
+	// Map phase with filtering
 	mappedResults := make([]interface{}, 0)
 	for _, userData := range uc.userDataById {
-		result := mapper(userData)
-		mappedResults = append(mappedResults, result)
+		if filter(userData) {
+			result := mapper(userData)
+			mappedResults = append(mappedResults, result)
+		}
 	}
 
+	// Reduce phase
 	return reducer(mappedResults)
 }
 
-func calculateExperience(userData *UserData) interface{} {
-	return userData.GetExperience()
+// Filter function to exclude users named "John"
+func excludeJohnFilter(userData *UserData) bool {
+	return userData.GetDisplayName() != "John"
 }
 
-func sumReducer(results []interface{}) interface{} {
-	total := int64(0)
-	for _, result := range results {
-		total += result.(int64)
+// Mapper function to count users by level
+func userLevelMapper(userData *UserData) interface{} {
+	return map[string]int{
+		"level": userData.GetGameLevel(),
+		"count": 1,
 	}
-	return total
+}
+
+// Reducer function to combine counts for each level
+func levelCountReducer(results []interface{}) interface{} {
+	levelCounts := make(map[int]int)
+
+	for _, result := range results {
+		levelData := result.(map[string]int)
+		level := levelData["level"]
+		count := levelData["count"]
+
+		levelCounts[level] += count
+	}
+
+	return levelCounts
 }
 
 func LoadUsersDataFromDB(usersCache *UsersCache) error {
@@ -155,6 +202,7 @@ func LoadUsersDataFromDB(usersCache *UsersCache) error {
 		NewUserData("uid_001", "king", 1, 100),
 		NewUserData("uid_002", "queen", 1, 110),
 		NewUserData("uid_003", "soldier", 1, 120),
+		NewUserData("uid_004", "John", 1, 120),
 	)
 	return nil
 }
@@ -182,10 +230,12 @@ func main() {
 				userdata.GameLevel = int(userdata.Experience / 100)
 			})
 		}()
-		go func() {
-			// totalExperience := usersCache.MapReduceUsers(calculateExperience, sumReducer)
-			// fmt.Printf("total exp: %v\n", totalExperience)
-		}()
+	}
+
+	levelCounts := usersCache.MapReduceUsersWithFilter(excludeJohnFilter, userLevelMapper, levelCountReducer)
+
+	for level, count := range levelCounts.(map[int]int) {
+		fmt.Printf("Level %d: %d users\n", level, count)
 	}
 
 	interrupt := make(chan os.Signal, 1)
